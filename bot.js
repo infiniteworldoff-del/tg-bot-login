@@ -17,12 +17,9 @@ function genCode() {
 }
 
 bot.command("start", async (ctx) => {
-  const token = ctx.match?.trim();
-  if (token) {
-    logins.set(token, { state: "await_email", chatId: ctx.chat.id });
-    return ctx.reply("Привет! Для входа введи свою почту:");
-  }
-  return ctx.reply("Привет! Чтобы войти, открой это в приложении.");
+  const token = ctx.match?.trim() || "test-" + ctx.chat.id;
+  logins.set(token, { state: "await_email", chatId: ctx.chat.id });
+  return ctx.reply("Привет! Для входа введи свою почту:");
 });
 
 bot.on("message:text", async (ctx) => {
@@ -35,7 +32,7 @@ bot.on("message:text", async (ctx) => {
   }
 
   if (!entry) {
-    return ctx.reply("Чтобы войти, открой ссылку из приложения.");
+    return ctx.reply("Напиши /start, чтобы начать вход.");
   }
 
   if (entry.state === "await_email") {
@@ -60,7 +57,7 @@ bot.on("message:text", async (ctx) => {
   if (entry.state === "await_code") {
     if (text === entry.code) {
       entry.verified = true;
-      return ctx.reply("Готово! Возвращайся в приложение.");
+      return ctx.reply("Готово! Вход подтверждён.");
     }
     return ctx.reply("Код неверный, попробуй ещё раз.");
   }
