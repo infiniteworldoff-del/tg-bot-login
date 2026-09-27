@@ -4,7 +4,7 @@
   "dependencies": {
     "grammy": "^1.21.1",
     "express": "^4.19.2",
-    "nodemailer": "^6.9.13"
+    "resend": "^4.0.0"
   },
   "scripts": {
     "start": "node bot.js"
