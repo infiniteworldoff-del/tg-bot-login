@@ -1,16 +1,11 @@
 import { Bot } from "grammy";
 import express from "express";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
 const bot = new Bot(process.env.TELEGRAM_TOKEN);
+const resend = new Resend(process.env.RESEND_API_KEY);
 
-// логин: token -> { state, email, code, verified }
 const logins = new Map();
-
-const mailer = nodemailer.createTransport({
-  service: "gmail",
-  auth: { user: process.env.GMAIL_USER, pass: process.env.GMAIL_PASS },
-});
 
 function genCode() {
   return String(Math.floor(100000 + Math.random() * 900000));
@@ -31,9 +26,7 @@ bot.on("message:text", async (ctx) => {
     if (v.chatId === chatId && !v.verified) { entry = v; break; }
   }
 
-  if (!entry) {
-    return ctx.reply("Напиши /start, чтобы начать вход.");
-  }
+  if (!entry) return ctx.reply("Напиши /start, чтобы начать вход.");
 
   if (entry.state === "await_email") {
     if (!text.includes("@")) return ctx.reply("Это не похоже на почту, попробуй ещё раз.");
@@ -41,8 +34,8 @@ bot.on("message:text", async (ctx) => {
     entry.code = genCode();
     entry.state = "await_code";
     try {
-      await mailer.sendMail({
-        from: process.env.GMAIL_USER,
+      await resend.emails.send({
+        from: "onboarding@resend.dev",
         to: text,
         subject: "Код входа",
         text: `Твой код: ${entry.code}`,
@@ -50,7 +43,7 @@ bot.on("message:text", async (ctx) => {
       return ctx.reply("Код отправлен на почту. Введи его сюда:");
     } catch (e) {
       console.error(e);
-      return ctx.reply("Не получилось отправить письмо, проверь адрес и попробуй снова.");
+      return ctx.reply("Не получилось отправить письмо, попробуй позже.");
     }
   }
 
