@@ -3,8 +3,7 @@
   "type": "module",
   "dependencies": {
     "grammy": "^1.21.1",
-    "express": "^4.19.2",
-    "resend": "^4.0.0"
+    "express": "^4.19.2"
   },
   "scripts": {
     "start": "node bot.js"
