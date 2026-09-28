@@ -1,18 +1,21 @@
+// ==================== ИМПОРТЫ ====================
 const TelegramBot = require("node-telegram-bot-api");
 const Database = require("better-sqlite3");
 const crypto = require("crypto");
 const fs = require("fs");
 
-// =====================================================
-// НАСТРОЙКИ
-// =====================================================
+// ==================== НАСТРОЙКИ ====================
 
 const BOT_TOKEN = process.env.TELEGRAM_TOKEN;
 
-const ADMIN_IDS = (process.env.ADMIN_IDS || "")
-    .split(",")
-    .map(id => Number(id.trim()))
-    .filter(id => Number.isInteger(id) && id > 0);
+// ДВА АДМИНА ОТДЕЛЬНО
+const ADMIN_ID_1 = 8723208814;
+const ADMIN_ID_2 = 123456789; // <-- сюда ID второго админа
+
+const ADMIN_IDS = [
+    ADMIN_ID_1,
+    ADMIN_ID_2
+];
 
 const CARD_NUMBER =
     process.env.CARD_NUMBER || "2200 1536 2364 5513";
@@ -25,14 +28,7 @@ if (!BOT_TOKEN) {
     process.exit(1);
 }
 
-if (!ADMIN_IDS.length) {
-    console.error("❌ ADMIN_IDS не установлен");
-    process.exit(1);
-}
-
-// =====================================================
-// ТАРИФЫ
-// =====================================================
+// ==================== ТАРИФЫ ====================
 
 const TARIFFS = {
     "50": {
@@ -54,17 +50,13 @@ const TARIFFS = {
     }
 };
 
-// =====================================================
-// BOT
-// =====================================================
+// ==================== БОТ ====================
 
 const bot = new TelegramBot(BOT_TOKEN, {
     polling: true
 });
 
-// =====================================================
-// DATABASE
-// =====================================================
+// ==================== БАЗА ====================
 
 const DB_FILE = fs.existsSync("/data")
     ? "/data/subscriptions.db"
@@ -74,12 +66,7 @@ const db = new Database(DB_FILE);
 
 db.pragma("journal_mode = WAL");
 
-// =====================================================
-// INIT DATABASE
-// =====================================================
-
 function initDb() {
-
     db.exec(`
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -100,9 +87,30 @@ function initDb() {
     `);
 }
 
-// =====================================================
-// USERS
-// =====================================================
+// ==================== АДМИНЫ ====================
+
+function isAdmin(userId) {
+    return ADMIN_IDS.includes(Number(userId));
+}
+
+async function sendToAllAdmins(text, options = {}) {
+    for (const adminId of ADMIN_IDS) {
+        try {
+            await bot.sendMessage(
+                adminId,
+                text,
+                options
+            );
+        } catch (error) {
+            console.error(
+                `Ошибка отправки админу ${adminId}:`,
+                error.message
+            );
+        }
+    }
+}
+
+// ==================== ПОЛЬЗОВАТЕЛИ ====================
 
 function upsertUser(userId, username = null) {
 
@@ -113,7 +121,6 @@ function upsertUser(userId, username = null) {
     `).run(userId, username);
 
     if (username) {
-
         db.prepare(`
             UPDATE users
             SET username = ?
@@ -131,39 +138,7 @@ function getUser(userId) {
     `).get(userId);
 }
 
-// =====================================================
-// ADMIN
-// =====================================================
-
-function isAdmin(userId) {
-    return ADMIN_IDS.includes(Number(userId));
-}
-
-async function sendToAdmins(text, options = {}) {
-
-    for (const adminId of ADMIN_IDS) {
-
-        try {
-
-            await bot.sendMessage(
-                adminId,
-                text,
-                options
-            );
-
-        } catch (error) {
-
-            console.error(
-                `Ошибка отправки админу ${adminId}:`,
-                error.message
-            );
-        }
-    }
-}
-
-// =====================================================
-// SUBSCRIPTION
-// =====================================================
+// ==================== ПОДПИСКА ====================
 
 function isSubActive(userId) {
 
@@ -210,9 +185,7 @@ function setSubscription(userId, days) {
     return until;
 }
 
-// =====================================================
-// ORDERS
-// =====================================================
+// ==================== ЗАКАЗЫ ====================
 
 function createOrder(userId, tariffKey) {
 
@@ -271,9 +244,7 @@ function getPendingOrder(userId) {
     `).get(userId);
 }
 
-// =====================================================
-// CONFIRM ORDER
-// =====================================================
+// ==================== ПОДТВЕРЖДЕНИЕ ====================
 
 function confirmOrder(orderId) {
 
@@ -287,54 +258,46 @@ function confirmOrder(orderId) {
     }
 
     if (order.status !== "pending") {
-
         return {
             success: false,
-            reason: "already_processed",
-            status: order.status
+            reason: "already_processed"
         };
     }
 
     const tariff = TARIFFS[order.tariff];
 
     if (!tariff) {
-
         return {
             success: false,
             reason: "tariff_not_found"
         };
     }
 
-    const transaction = db.transaction(() => {
+    const until = setSubscription(
+        order.user_id,
+        tariff.days
+    );
 
-        db.prepare(`
-            UPDATE payments
-            SET
-                status = 'paid',
-                paid_at = ?
-            WHERE order_id = ?
-            AND status = 'pending'
-        `).run(
-            new Date().toISOString(),
-            orderId
-        );
+    db.prepare(`
+        UPDATE payments
+        SET
+            status = 'paid',
+            paid_at = ?
+        WHERE order_id = ?
+        AND status = 'pending'
+    `).run(
+        new Date().toISOString(),
+        orderId
+    );
 
-        db.prepare(`
-            UPDATE users
-            SET total_paid = total_paid + ?
-            WHERE user_id = ?
-        `).run(
-            order.amount,
-            order.user_id
-        );
-
-        return setSubscription(
-            order.user_id,
-            tariff.days
-        );
-    });
-
-    const until = transaction();
+    db.prepare(`
+        UPDATE users
+        SET total_paid = total_paid + ?
+        WHERE user_id = ?
+    `).run(
+        order.amount,
+        order.user_id
+    );
 
     return {
         success: true,
@@ -343,16 +306,13 @@ function confirmOrder(orderId) {
     };
 }
 
-// =====================================================
-// REJECT ORDER
-// =====================================================
+// ==================== ОТКЛОНЕНИЕ ====================
 
 function rejectOrder(orderId) {
 
     const order = getOrder(orderId);
 
     if (!order) {
-
         return {
             success: false,
             reason: "not_found"
@@ -360,7 +320,6 @@ function rejectOrder(orderId) {
     }
 
     if (order.status !== "pending") {
-
         return {
             success: false,
             reason: "already_processed"
@@ -380,9 +339,7 @@ function rejectOrder(orderId) {
     };
 }
 
-// =====================================================
-// KEYBOARD
-// =====================================================
+// ==================== КЛАВИАТУРЫ ====================
 
 function mainMenu() {
 
@@ -451,12 +408,12 @@ function adminButtons(orderId) {
                     {
                         text: "✅ Подтвердить",
                         callback_data:
-                            `admin_confirm_${orderId}`
+                            `confirm_${orderId}`
                     },
                     {
                         text: "❌ Отклонить",
                         callback_data:
-                            `admin_reject_${orderId}`
+                            `reject_${orderId}`
                     }
                 ]
             ]
@@ -464,9 +421,7 @@ function adminButtons(orderId) {
     };
 }
 
-// =====================================================
-// START
-// =====================================================
+// ==================== START ====================
 
 bot.onText(/^\/start/, async (msg) => {
 
@@ -479,36 +434,27 @@ bot.onText(/^\/start/, async (msg) => {
         msg.chat.id,
 
         "👋 Добро пожаловать в J.A.R.V.I.S!\n\n" +
-
-        "Это бот для покупки подписки на приложение.\n\n" +
-
+        "Это бот для покупки подписки.\n\n" +
         "Выберите действие:",
 
         mainMenu()
     );
 });
 
-// =====================================================
-// ID
-// =====================================================
+// ==================== ID ====================
 
 bot.onText(/^\/id$/, async (msg) => {
 
     await bot.sendMessage(
         msg.chat.id,
-
-        `🆔 Ваш Telegram ID:\n\n` +
-        `\`${msg.from.id}\``,
-
+        `🆔 Ваш Telegram ID:\n\n\`${msg.from.id}\``,
         {
             parse_mode: "Markdown"
         }
     );
 });
 
-// =====================================================
-// PENDING
-// =====================================================
+// ==================== PENDING ====================
 
 bot.onText(/^\/pending$/, async (msg) => {
 
@@ -516,14 +462,14 @@ bot.onText(/^\/pending$/, async (msg) => {
         return;
     }
 
-    const orders = db.prepare(`
+    const rows = db.prepare(`
         SELECT *
         FROM payments
         WHERE status = 'pending'
         ORDER BY created_at DESC
     `).all();
 
-    if (!orders.length) {
+    if (!rows.length) {
 
         await bot.sendMessage(
             msg.chat.id,
@@ -533,19 +479,17 @@ bot.onText(/^\/pending$/, async (msg) => {
         return;
     }
 
-    let text =
-        "🕓 Ожидающие заказы:\n\n";
+    let text = "🕓 Ожидающие заказы:\n\n";
 
-    for (const order of orders) {
+    for (const row of rows) {
 
-        const tariff =
-            TARIFFS[order.tariff];
+        const tariff = TARIFFS[row.tariff];
 
         text +=
-            `🧾 ${order.order_id}\n` +
-            `👤 ${order.user_id}\n` +
-            `📦 ${tariff.name}\n` +
-            `💰 ${order.amount} ₽\n\n`;
+            `🧾 Заказ: ${row.order_id}\n` +
+            `👤 User ID: ${row.user_id}\n` +
+            `📦 Тариф: ${tariff.name}\n` +
+            `💰 Сумма: ${row.amount} ₽\n\n`;
     }
 
     await bot.sendMessage(
@@ -554,9 +498,7 @@ bot.onText(/^\/pending$/, async (msg) => {
     );
 });
 
-// =====================================================
-// MAIN MESSAGE HANDLER
-// =====================================================
+// ==================== ОСНОВНЫЕ КНОПКИ ====================
 
 bot.on("message", async (msg) => {
 
@@ -578,34 +520,27 @@ bot.on("message", async (msg) => {
 
             await bot.sendMessage(
                 msg.chat.id,
-
                 "❌ У вас нет активной подписки.\n\n" +
                 "Нажмите «🛒 Купить».",
-
                 mainMenu()
             );
 
             return;
         }
 
-        const user =
-            getUser(msg.from.id);
+        const user = getUser(msg.from.id);
 
-        const until =
-            new Date(
-                user.sub_until
-            ).toLocaleString("ru-RU");
+        const until = new Date(
+            user.sub_until
+        ).toLocaleString("ru-RU");
 
         await bot.sendMessage(
             msg.chat.id,
 
             `✅ Подписка активна до:\n${until}\n\n` +
-
-            `🔑 Ваш ключ доступа:\n` +
-
+            `🔑 Ваш ключ доступа:\n\n` +
             `\`${msg.from.id}\`\n\n` +
-
-            "Введите этот ключ в приложении J.A.R.V.I.S.",
+            `Введите этот ключ в приложении J.A.R.V.I.S.`,
 
             {
                 parse_mode: "Markdown",
@@ -635,12 +570,9 @@ bot.on("message", async (msg) => {
             msg.chat.id,
 
             "ℹ️ Помощь\n\n" +
-
-            "🔑 Войти — получить ключ.\n\n" +
-
+            "🔑 Войти — получить ключ.\n" +
             "🛒 Купить — приобрести подписку.\n\n" +
-
-            "📷 После оплаты отправьте чек боту.",
+            "После оплаты отправьте чек боту.",
 
             mainMenu()
         );
@@ -649,9 +581,7 @@ bot.on("message", async (msg) => {
     }
 });
 
-// =====================================================
-// CALLBACKS
-// =====================================================
+// ==================== CALLBACK ====================
 
 bot.on("callback_query", async (query) => {
 
@@ -668,9 +598,7 @@ bot.on("callback_query", async (query) => {
         // Назад
         if (data === "back") {
 
-            await bot.answerCallbackQuery(
-                query.id
-            );
+            await bot.answerCallbackQuery(query.id);
 
             await bot.sendMessage(
                 chatId,
@@ -705,32 +633,26 @@ bot.on("callback_query", async (query) => {
                     tariffKey
                 );
 
-            await bot.answerCallbackQuery(
-                query.id
-            );
+            await bot.answerCallbackQuery(query.id);
 
             await bot.editMessageText(
 
                 `🧾 Заказ №\`${orderId}\`\n\n` +
 
                 `📦 Тариф: ${tariff.name}\n` +
-
                 `💰 Сумма: ${tariff.price} ₽\n\n` +
 
                 `💳 Реквизиты для оплаты:\n\n` +
 
                 `Карта: \`${CARD_NUMBER}\`\n` +
-
                 `${CARD_HOLDER}\n\n` +
 
                 `⚠️ После перевода сохраните чек.\n\n` +
-
                 `Затем нажмите «📷 Я оплатил».`,
 
                 {
                     chat_id: chatId,
                     message_id: messageId,
-
                     parse_mode: "Markdown",
 
                     reply_markup: {
@@ -756,7 +678,7 @@ bot.on("callback_query", async (query) => {
             return;
         }
 
-        // Я оплатил
+        // Оплата
         if (data.startsWith("paid_")) {
 
             const orderId =
@@ -778,44 +700,13 @@ bot.on("callback_query", async (query) => {
                 return;
             }
 
-            if (order.user_id !== query.from.id) {
-
-                await bot.answerCallbackQuery(
-                    query.id,
-                    {
-                        text: "Это не ваш заказ",
-                        show_alert: true
-                    }
-                );
-
-                return;
-            }
-
-            if (order.status !== "pending") {
-
-                await bot.answerCallbackQuery(
-                    query.id,
-                    {
-                        text: "Заказ уже обработан",
-                        show_alert: true
-                    }
-                );
-
-                return;
-            }
-
-            await bot.answerCallbackQuery(
-                query.id
-            );
+            await bot.answerCallbackQuery(query.id);
 
             await bot.sendMessage(
-
                 chatId,
 
                 `📷 Отправьте чек сюда.\n\n` +
-
                 `🧾 Заказ: \`${orderId}\`\n` +
-
                 `💰 Сумма: ${order.amount} ₽`,
 
                 {
@@ -826,11 +717,9 @@ bot.on("callback_query", async (query) => {
             return;
         }
 
-        // =================================================
-        // ADMIN CONFIRM
-        // =================================================
+        // ==================== ПОДТВЕРДИТЬ ====================
 
-        if (data.startsWith("admin_confirm_")) {
+        if (data.startsWith("confirm_")) {
 
             if (!isAdmin(query.from.id)) {
 
@@ -846,9 +735,7 @@ bot.on("callback_query", async (query) => {
             }
 
             const orderId =
-                data.substring(
-                    "admin_confirm_".length
-                );
+                data.substring(8);
 
             const result =
                 confirmOrder(orderId);
@@ -862,7 +749,7 @@ bot.on("callback_query", async (query) => {
                             result.reason ===
                             "already_processed"
                                 ? "Заказ уже обработан"
-                                : "Ошибка заказа",
+                                : "Заказ не найден",
                         show_alert: true
                     }
                 );
@@ -877,7 +764,6 @@ bot.on("callback_query", async (query) => {
                 }
             );
 
-            // Убираем кнопки
             try {
 
                 await bot.editMessageReplyMarkup(
@@ -890,24 +776,19 @@ bot.on("callback_query", async (query) => {
                     }
                 );
 
-            } catch (error) {}
+            } catch (e) {}
 
             const until =
-                result.until.toLocaleString(
-                    "ru-RU"
-                );
+                result.until.toLocaleString("ru-RU");
 
-            // Пользователь
+            // Пользователю
             await bot.sendMessage(
 
                 result.userId,
 
                 `🎉 Оплата подтверждена!\n\n` +
-
                 `📅 Подписка активна до:\n${until}\n\n` +
-
                 `🔑 Ваш ключ:\n` +
-
                 `\`${result.userId}\``,
 
                 {
@@ -916,26 +797,21 @@ bot.on("callback_query", async (query) => {
                 }
             );
 
-            // Всем админам
-            await sendToAdmins(
+            // Обоим админам
+            await sendToAllAdmins(
 
                 `✅ Заказ подтверждён\n\n` +
-
                 `🧾 Заказ: ${orderId}\n` +
-
                 `👤 Пользователь: ${result.userId}\n` +
-
                 `📅 До: ${until}`
             );
 
             return;
         }
 
-        // =================================================
-        // ADMIN REJECT
-        // =================================================
+        // ==================== ОТКЛОНИТЬ ====================
 
-        if (data.startsWith("admin_reject_")) {
+        if (data.startsWith("reject_")) {
 
             if (!isAdmin(query.from.id)) {
 
@@ -951,9 +827,7 @@ bot.on("callback_query", async (query) => {
             }
 
             const orderId =
-                data.substring(
-                    "admin_reject_".length
-                );
+                data.substring(7);
 
             const result =
                 rejectOrder(orderId);
@@ -990,15 +864,14 @@ bot.on("callback_query", async (query) => {
                     }
                 );
 
-            } catch (error) {}
+            } catch (e) {}
 
             await bot.sendMessage(
 
                 result.userId,
 
                 `❌ Оплата заказа \`${orderId}\` не подтверждена.\n\n` +
-
-                `Если произошла ошибка, свяжитесь с администратором.`,
+                `Свяжитесь с администратором.`,
 
                 {
                     parse_mode: "Markdown",
@@ -1006,7 +879,7 @@ bot.on("callback_query", async (query) => {
                 }
             );
 
-            await sendToAdmins(
+            await sendToAllAdmins(
 
                 `❌ Заказ отклонён\n\n` +
                 `🧾 Заказ: ${orderId}\n` +
@@ -1024,7 +897,6 @@ bot.on("callback_query", async (query) => {
         );
 
         try {
-
             await bot.answerCallbackQuery(
                 query.id,
                 {
@@ -1032,233 +904,192 @@ bot.on("callback_query", async (query) => {
                     show_alert: true
                 }
             );
-
         } catch (e) {}
     }
 });
 
-// =====================================================
-// PHOTO CHECK
-// =====================================================
+// ==================== ЧЕК: ФОТО ====================
 
 bot.on("photo", async (msg) => {
 
-    try {
+    const order =
+        getPendingOrder(msg.from.id);
 
-        const order =
-            getPendingOrder(
-                msg.from.id
-            );
-
-        if (!order) {
-
-            await bot.sendMessage(
-                msg.chat.id,
-
-                "❌ У вас нет ожидающего заказа.\n\n" +
-                "Сначала выберите тариф."
-            );
-
-            return;
-        }
-
-        const username =
-            msg.from.username
-                ? `@${msg.from.username}`
-                : "нет";
+    if (!order) {
 
         await bot.sendMessage(
-
             msg.chat.id,
-
-            `✅ Чек получен!\n\n` +
-
-            `🧾 Заказ: \`${order.order_id}\`\n\n` +
-
-            `Ожидайте проверки администратора.`,
-
-            {
-                parse_mode: "Markdown"
-            }
+            "❌ У вас нет ожидающего заказа."
         );
 
-        // Отправляем информацию ВСЕМ админам
-        await sendToAdmins(
+        return;
+    }
 
-            `💰 НОВЫЙ ПЛАТЁЖ\n\n` +
+    const username =
+        msg.from.username
+            ? `@${msg.from.username}`
+            : "нет";
 
-            `🧾 Заказ: \`${order.order_id}\`\n` +
+    await bot.sendMessage(
+        msg.chat.id,
 
-            `👤 User ID: ${msg.from.id}\n` +
+        `✅ Чек получен!\n\n` +
+        `🧾 Заказ: \`${order.order_id}\`\n\n` +
+        `Ожидайте проверки администратора.`,
 
-            `👤 Username: ${username}\n` +
-
-            `📦 Тариф: ${TARIFFS[order.tariff].name}\n` +
-
-            `💰 Сумма: ${order.amount} ₽`,
-
-            {
-                parse_mode: "Markdown"
-            }
-        );
-
-        // Отправляем сам чек ВСЕМ админам
-        for (const adminId of ADMIN_IDS) {
-
-            try {
-
-                await bot.forwardMessage(
-                    adminId,
-                    msg.chat.id,
-                    msg.message_id
-                );
-
-                await bot.sendMessage(
-
-                    adminId,
-
-                    `Что сделать с заказом \`${order.order_id}\`?`,
-
-                    {
-                        parse_mode: "Markdown",
-                        ...adminButtons(
-                            order.order_id
-                        )
-                    }
-                );
-
-            } catch (error) {
-
-                console.error(
-                    `Ошибка отправки чека админу ${adminId}:`,
-                    error.message
-                );
-            }
+        {
+            parse_mode: "Markdown"
         }
+    );
 
-    } catch (error) {
+    const adminText =
 
-        console.error(
-            "Ошибка фото:",
-            error
-        );
+        `💰 НОВЫЙ ПЛАТЁЖ\n\n` +
+
+        `🧾 Заказ: \`${order.order_id}\`\n` +
+
+        `👤 User ID: ${msg.from.id}\n` +
+
+        `👤 Username: ${username}\n` +
+
+        `📦 Тариф: ${TARIFFS[order.tariff].name}\n` +
+
+        `💰 Сумма: ${order.amount} ₽`;
+
+    // Отправляем обоим админам
+    for (const adminId of ADMIN_IDS) {
+
+        try {
+
+            await bot.sendMessage(
+                adminId,
+                adminText,
+                {
+                    parse_mode: "Markdown"
+                }
+            );
+
+            await bot.forwardMessage(
+                adminId,
+                msg.chat.id,
+                msg.message_id
+            );
+
+            await bot.sendMessage(
+                adminId,
+
+                `Что сделать с заказом \`${order.order_id}\`?`,
+
+                {
+                    parse_mode: "Markdown",
+                    ...adminButtons(order.order_id)
+                }
+            );
+
+        } catch (error) {
+
+            console.error(
+                `Ошибка отправки админу ${adminId}:`,
+                error.message
+            );
+        }
     }
 });
 
-// =====================================================
-// DOCUMENT CHECK
-// =====================================================
+// ==================== ЧЕК: ФАЙЛ ====================
 
 bot.on("document", async (msg) => {
 
-    try {
+    const order =
+        getPendingOrder(msg.from.id);
 
-        const order =
-            getPendingOrder(
-                msg.from.id
-            );
-
-        if (!order) {
-
-            await bot.sendMessage(
-                msg.chat.id,
-                "❌ У вас нет ожидающего заказа."
-            );
-
-            return;
-        }
-
-        const username =
-            msg.from.username
-                ? `@${msg.from.username}`
-                : "нет";
+    if (!order) {
 
         await bot.sendMessage(
-
             msg.chat.id,
-
-            `✅ Чек получен!\n\n` +
-
-            `🧾 Заказ: \`${order.order_id}\`\n\n` +
-
-            `Ожидайте проверки администратора.`,
-
-            {
-                parse_mode: "Markdown"
-            }
+            "❌ У вас нет ожидающего заказа."
         );
 
-        for (const adminId of ADMIN_IDS) {
+        return;
+    }
 
-            try {
+    const username =
+        msg.from.username
+            ? `@${msg.from.username}`
+            : "нет";
 
-                await bot.sendMessage(
+    await bot.sendMessage(
+        msg.chat.id,
 
-                    adminId,
+        `✅ Чек получен!\n\n` +
+        `🧾 Заказ: \`${order.order_id}\`\n\n` +
+        `Ожидайте проверки администратора.`,
 
-                    `💰 НОВЫЙ ПЛАТЁЖ\n\n` +
-
-                    `🧾 Заказ: \`${order.order_id}\`\n` +
-
-                    `👤 User ID: ${msg.from.id}\n` +
-
-                    `👤 Username: ${username}\n` +
-
-                    `📦 Тариф: ${TARIFFS[order.tariff].name}\n` +
-
-                    `💰 Сумма: ${order.amount} ₽`,
-
-                    {
-                        parse_mode: "Markdown"
-                    }
-                );
-
-                await bot.forwardMessage(
-                    adminId,
-                    msg.chat.id,
-                    msg.message_id
-                );
-
-                await bot.sendMessage(
-
-                    adminId,
-
-                    `Что сделать с заказом \`${order.order_id}\`?`,
-
-                    {
-                        parse_mode: "Markdown",
-                        ...adminButtons(
-                            order.order_id
-                        )
-                    }
-                );
-
-            } catch (error) {
-
-                console.error(
-                    `Ошибка админу ${adminId}:`,
-                    error.message
-                );
-            }
+        {
+            parse_mode: "Markdown"
         }
+    );
 
-    } catch (error) {
+    const adminText =
 
-        console.error(
-            "Ошибка документа:",
-            error
-        );
+        `💰 НОВЫЙ ПЛАТЁЖ\n\n` +
+
+        `🧾 Заказ: \`${order.order_id}\`\n` +
+
+        `👤 User ID: ${msg.from.id}\n` +
+
+        `👤 Username: ${username}\n` +
+
+        `📦 Тариф: ${TARIFFS[order.tariff].name}\n` +
+
+        `💰 Сумма: ${order.amount} ₽`;
+
+    for (const adminId of ADMIN_IDS) {
+
+        try {
+
+            await bot.sendMessage(
+                adminId,
+                adminText,
+                {
+                    parse_mode: "Markdown"
+                }
+            );
+
+            await bot.forwardMessage(
+                adminId,
+                msg.chat.id,
+                msg.message_id
+            );
+
+            await bot.sendMessage(
+                adminId,
+
+                `Что сделать с заказом \`${order.order_id}\`?`,
+
+                {
+                    parse_mode: "Markdown",
+                    ...adminButtons(order.order_id)
+                }
+            );
+
+        } catch (error) {
+
+            console.error(
+                `Ошибка админу ${adminId}:`,
+                error.message
+            );
+        }
     }
 });
 
-// =====================================================
-// START DATABASE
-// =====================================================
+// ==================== ЗАПУСК ====================
 
 initDb();
 
-console.log("====================================");
+console.log("=================================");
 console.log("🤖 J.A.R.V.I.S BOT ЗАПУЩЕН");
-console.log("👑 ADMIN IDS:", ADMIN_IDS.join(", "));
+console.log("👑 ADMIN 1:", ADMIN_ID_1);
+console.log("👑 ADMIN 2:", ADMIN_ID_2);
 console.log("💾 DATABASE:", DB_FILE);
-console.log("====================================");
+console.log("=================================");
