@@ -99,41 +99,4 @@ bot.on("message:text", async (ctx) => {
     return toMenu(ctx, "Регистрация завершена! Теперь нажми «Вход».");
   }
 
-  if (s.step === "await_code") {
-    ctx.deleteMessage().catch(() => {});
-    const u = users.get(s.phone);
-    const ok = u && timingSafeEqual(hashCode(text, u.salt), u.hash);
-    if (ok) {
-      const entry = logins.get(s.token);
-      if (entry) {
-        entry.verified = true;
-        entry.phone = s.phone;
-      }
-      s.step = "menu";
-      return ctx.reply("Готово! Вход подтверждён. Возвращайся в приложение.", {
-        reply_markup: menuKb,
-      });
-    }
-    s.attempts++;
-    if (s.attempts >= 5) {
-      return toMenu(ctx, "Слишком много попыток. Начни заново.");
-    }
-    return ctx.reply("Неверный код, попробуй ещё раз:");
-  }
-
-  return ctx.reply("Выбери действие кнопкой ниже:", { reply_markup: menuKb });
-});
-
-bot.start();
-
-const app = express();
-app.get("/new-token", (req, res) => {
-  const token = Math.random().toString(36).slice(2) + Date.now();
-  res.json({ token });
-});
-app.get("/status", (req, res) => {
-  const entry = logins.get(req.query.token);
-  if (!entry) return res.json({ verified: false });
-  res.json({ verified: !!entry.verified, phone: entry.phone ?? null });
-});
-app.listen(process.env.PORT || 3000, () => console.log("HTTP запущен"));
+  if (s.step === "await_code")
