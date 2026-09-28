@@ -1,6 +1,7 @@
 {
-  "name": "jarvis-telegram-bot",
+  "name": "tg-bot-login",
   "version": "1.0.0",
+  "description": "J.A.R.V.I.S Telegram subscription bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
