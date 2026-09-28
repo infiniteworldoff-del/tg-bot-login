@@ -1,60 +1,45 @@
-import { Bot } from "grammy";
+import { Bot, Keyboard } from "grammy";
 import express from "express";
-import { Resend } from "resend";
 
 const bot = new Bot(process.env.TELEGRAM_TOKEN);
-const resend = new Resend(process.env.RESEND_API_KEY);
 
+// token -> { chatId, verified, phone }
 const logins = new Map();
-
-function genCode() {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
 
 bot.command("start", async (ctx) => {
   const token = ctx.match?.trim() || "test-" + ctx.chat.id;
-  logins.set(token, { state: "await_email", chatId: ctx.chat.id });
-  return ctx.reply("Привет! Для входа введи свою почту:");
+  logins.set(token, { chatId: ctx.chat.id, verified: false });
+  const kb = new Keyboard()
+    .requestContact("📱 Поделиться номером")
+    .oneTime()
+    .resized();
+  return ctx.reply("Привет! Для входа нажми кнопку ниже и поделись номером:", {
+    reply_markup: kb,
+  });
 });
 
-bot.on("message:text", async (ctx) => {
-  const chatId = ctx.chat.id;
-  const text = ctx.message.text.trim();
-
-  let entry = null;
+bot.on("message:contact", async (ctx) => {
+  const contact = ctx.message.contact;
+  if (contact.user_id !== ctx.from.id) {
+    return ctx.reply("Нужно отправить свой номер кнопкой «Поделиться номером».");
+  }
+  let found = false;
   for (const [, v] of logins) {
-    if (v.chatId === chatId && !v.verified) { entry = v; break; }
-  }
-
-  if (!entry) return ctx.reply("Напиши /start, чтобы начать вход.");
-
-  if (entry.state === "await_email") {
-    if (!text.includes("@")) return ctx.reply("Это не похоже на почту, попробуй ещё раз.");
-    entry.email = text;
-    entry.code = genCode();
-    entry.state = "await_code";
-    try {
-      await resend.emails.send({
-        from: "onboarding@resend.dev",
-        to: text,
-        subject: "Код входа",
-        text: `Твой код: ${entry.code}`,
-      });
-      return ctx.reply("Код отправлен на почту. Введи его сюда:");
-    } catch (e) {
-      console.error(e);
-      return ctx.reply("Не получилось отправить письмо, попробуй позже.");
+    if (v.chatId === ctx.chat.id && !v.verified) {
+      v.verified = true;
+      v.phone = contact.phone_number;
+      found = true;
     }
   }
-
-  if (entry.state === "await_code") {
-    if (text === entry.code) {
-      entry.verified = true;
-      return ctx.reply("Готово! Вход подтверждён.");
-    }
-    return ctx.reply("Код неверный, попробуй ещё раз.");
-  }
+  if (!found) return ctx.reply("Напиши /start, чтобы начать вход.");
+  return ctx.reply("Готово! Вход подтверждён.", {
+    reply_markup: { remove_keyboard: true },
+  });
 });
+
+bot.on("message:text", (ctx) =>
+  ctx.reply("Напиши /start, чтобы войти.")
+);
 
 bot.start();
 
@@ -66,6 +51,6 @@ app.get("/new-token", (req, res) => {
 app.get("/status", (req, res) => {
   const entry = logins.get(req.query.token);
   if (!entry) return res.json({ verified: false });
-  res.json({ verified: !!entry.verified, email: entry.email ?? null });
+  res.json({ verified: !!entry.verified, phone: entry.phone ?? null });
 });
 app.listen(process.env.PORT || 3000, () => console.log("HTTP запущен"));
