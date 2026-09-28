@@ -1,6 +1,7 @@
 {
   "name": "tg-bot-login",
   "version": "1.0.0",
+  "description": "Telegram subscription bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
