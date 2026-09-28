@@ -1,8 +1,3 @@
-// =====================================================
-// J.A.R.V.I.S — Telegram Bot
-// Railway + SQLite
-// =====================================================
-
 const TelegramBot = require("node-telegram-bot-api");
 const Database = require("better-sqlite3");
 const crypto = require("crypto");
@@ -14,19 +9,24 @@ const fs = require("fs");
 
 const BOT_TOKEN = process.env.TELEGRAM_TOKEN;
 
-const ADMIN_ID = Number(process.env.ADMIN_ID || "8723208814");
+const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+    .split(",")
+    .map(id => Number(id.trim()))
+    .filter(id => Number.isInteger(id) && id > 0);
 
-// Реквизиты берём из Railway Variables
-const CARD_NUMBER = process.env.CARD_NUMBER || "2200 1536 2364 5513";
-const CARD_HOLDER = process.env.CARD_HOLDER || "Получатель: Алексей М.";
+const CARD_NUMBER =
+    process.env.CARD_NUMBER || "2200 1536 2364 5513";
+
+const CARD_HOLDER =
+    process.env.CARD_HOLDER || "Получатель: Алексей М.";
 
 if (!BOT_TOKEN) {
-    console.error("❌ TELEGRAM_TOKEN не установлен!");
+    console.error("❌ TELEGRAM_TOKEN не установлен");
     process.exit(1);
 }
 
-if (!ADMIN_ID) {
-    console.error("❌ ADMIN_ID не установлен!");
+if (!ADMIN_IDS.length) {
+    console.error("❌ ADMIN_IDS не установлен");
     process.exit(1);
 }
 
@@ -55,20 +55,16 @@ const TARIFFS = {
 };
 
 // =====================================================
-// TELEGRAM
+// BOT
 // =====================================================
 
 const bot = new TelegramBot(BOT_TOKEN, {
     polling: true
 });
 
-console.log("🚀 Запуск бота...");
-
 // =====================================================
 // DATABASE
 // =====================================================
-
-// Railway Volume должен быть подключён к /data
 
 const DB_FILE = fs.existsSync("/data")
     ? "/data/subscriptions.db"
@@ -76,10 +72,10 @@ const DB_FILE = fs.existsSync("/data")
 
 const db = new Database(DB_FILE);
 
-console.log(`📁 База данных: ${DB_FILE}`);
+db.pragma("journal_mode = WAL");
 
 // =====================================================
-// ИНИЦИАЛИЗАЦИЯ БД
+// INIT DATABASE
 // =====================================================
 
 function initDb() {
@@ -91,9 +87,7 @@ function initDb() {
             sub_until TEXT,
             total_paid INTEGER DEFAULT 0
         );
-    `);
 
-    db.exec(`
         CREATE TABLE IF NOT EXISTS payments (
             order_id TEXT PRIMARY KEY,
             user_id INTEGER NOT NULL,
@@ -109,22 +103,6 @@ function initDb() {
 // =====================================================
 // USERS
 // =====================================================
-
-function getUser(userId) {
-
-    return db
-        .prepare(`
-            SELECT
-                user_id,
-                username,
-                sub_until,
-                total_paid
-            FROM users
-            WHERE user_id = ?
-        `)
-        .get(userId);
-}
-
 
 function upsertUser(userId, username = null) {
 
@@ -144,34 +122,78 @@ function upsertUser(userId, username = null) {
     }
 }
 
+function getUser(userId) {
+
+    return db.prepare(`
+        SELECT *
+        FROM users
+        WHERE user_id = ?
+    `).get(userId);
+}
+
 // =====================================================
-// ПОДПИСКА
+// ADMIN
 // =====================================================
+
+function isAdmin(userId) {
+    return ADMIN_IDS.includes(Number(userId));
+}
+
+async function sendToAdmins(text, options = {}) {
+
+    for (const adminId of ADMIN_IDS) {
+
+        try {
+
+            await bot.sendMessage(
+                adminId,
+                text,
+                options
+            );
+
+        } catch (error) {
+
+            console.error(
+                `Ошибка отправки админу ${adminId}:`,
+                error.message
+            );
+        }
+    }
+}
+
+// =====================================================
+// SUBSCRIPTION
+// =====================================================
+
+function isSubActive(userId) {
+
+    const user = getUser(userId);
+
+    if (!user || !user.sub_until) {
+        return false;
+    }
+
+    return new Date(user.sub_until) > new Date();
+}
 
 function setSubscription(userId, days) {
 
-    const row = db
-        .prepare(`
-            SELECT sub_until
-            FROM users
-            WHERE user_id = ?
-        `)
-        .get(userId);
+    const user = getUser(userId);
 
     const now = new Date();
 
     let start = now;
 
-    if (row && row.sub_until) {
+    if (user && user.sub_until) {
 
-        const current = new Date(row.sub_until);
+        const current = new Date(user.sub_until);
 
         if (current > now) {
             start = current;
         }
     }
 
-    const newUntil = new Date(
+    const until = new Date(
         start.getTime() +
         days * 24 * 60 * 60 * 1000
     );
@@ -181,23 +203,11 @@ function setSubscription(userId, days) {
         SET sub_until = ?
         WHERE user_id = ?
     `).run(
-        newUntil.toISOString(),
+        until.toISOString(),
         userId
     );
 
-    return newUntil;
-}
-
-
-function isSubActive(userId) {
-
-    const row = getUser(userId);
-
-    if (!row || !row.sub_until) {
-        return false;
-    }
-
-    return new Date(row.sub_until) > new Date();
+    return until;
 }
 
 // =====================================================
@@ -209,7 +219,7 @@ function createOrder(userId, tariffKey) {
     const tariff = TARIFFS[tariffKey];
 
     if (!tariff) {
-        throw new Error("Неизвестный тариф");
+        throw new Error("Тариф не найден");
     }
 
     const orderId = crypto
@@ -218,7 +228,8 @@ function createOrder(userId, tariffKey) {
         .toUpperCase();
 
     db.prepare(`
-        INSERT INTO payments (
+        INSERT INTO payments
+        (
             order_id,
             user_id,
             tariff,
@@ -239,58 +250,58 @@ function createOrder(userId, tariffKey) {
     return orderId;
 }
 
-
 function getOrder(orderId) {
 
-    return db
-        .prepare(`
-            SELECT
-                order_id,
-                user_id,
-                tariff,
-                amount,
-                status,
-                created_at,
-                paid_at
-            FROM payments
-            WHERE order_id = ?
-        `)
-        .get(orderId);
+    return db.prepare(`
+        SELECT *
+        FROM payments
+        WHERE order_id = ?
+    `).get(orderId);
 }
 
+function getPendingOrder(userId) {
+
+    return db.prepare(`
+        SELECT *
+        FROM payments
+        WHERE user_id = ?
+        AND status = 'pending'
+        ORDER BY created_at DESC
+        LIMIT 1
+    `).get(userId);
+}
 
 // =====================================================
-// ПОДТВЕРЖДЕНИЕ ЗАКАЗА
+// CONFIRM ORDER
 // =====================================================
 
 function confirmOrder(orderId) {
 
-    const row = getOrder(orderId);
+    const order = getOrder(orderId);
 
-    if (!row) {
+    if (!order) {
         return {
             success: false,
             reason: "not_found"
         };
     }
 
-    // Защита от повторного подтверждения
-    if (row.status !== "pending") {
+    if (order.status !== "pending") {
 
         return {
             success: false,
             reason: "already_processed",
-            status: row.status
+            status: order.status
         };
     }
 
-    const tariff = TARIFFS[row.tariff];
+    const tariff = TARIFFS[order.tariff];
 
     if (!tariff) {
 
         return {
             success: false,
-            reason: "tariff_error"
+            reason: "tariff_not_found"
         };
     }
 
@@ -302,7 +313,7 @@ function confirmOrder(orderId) {
                 status = 'paid',
                 paid_at = ?
             WHERE order_id = ?
-              AND status = 'pending'
+            AND status = 'pending'
         `).run(
             new Date().toISOString(),
             orderId
@@ -313,12 +324,12 @@ function confirmOrder(orderId) {
             SET total_paid = total_paid + ?
             WHERE user_id = ?
         `).run(
-            row.amount,
-            row.user_id
+            order.amount,
+            order.user_id
         );
 
         return setSubscription(
-            row.user_id,
+            order.user_id,
             tariff.days
         );
     });
@@ -327,33 +338,32 @@ function confirmOrder(orderId) {
 
     return {
         success: true,
-        userId: row.user_id,
-        until
+        userId: order.user_id,
+        until: until
     };
 }
 
-
 // =====================================================
-// ОТКЛОНЕНИЕ
+// REJECT ORDER
 // =====================================================
 
 function rejectOrder(orderId) {
 
-    const row = getOrder(orderId);
+    const order = getOrder(orderId);
 
-    if (!row) {
+    if (!order) {
+
         return {
             success: false,
             reason: "not_found"
         };
     }
 
-    if (row.status !== "pending") {
+    if (order.status !== "pending") {
 
         return {
             success: false,
-            reason: "already_processed",
-            status: row.status
+            reason: "already_processed"
         };
     }
 
@@ -361,61 +371,17 @@ function rejectOrder(orderId) {
         UPDATE payments
         SET status = 'rejected'
         WHERE order_id = ?
-          AND status = 'pending'
+        AND status = 'pending'
     `).run(orderId);
 
     return {
         success: true,
-        userId: row.user_id
+        userId: order.user_id
     };
 }
 
-
 // =====================================================
-// ОЖИДАЮЩИЕ ЗАКАЗЫ
-// =====================================================
-
-function getPendingOrders() {
-
-    return db.prepare(`
-        SELECT
-            order_id,
-            user_id,
-            tariff,
-            amount,
-            status,
-            created_at
-        FROM payments
-        WHERE status = 'pending'
-        ORDER BY created_at DESC
-    `).all();
-}
-
-
-// =====================================================
-// АКТИВНЫЙ ЗАКАЗ ПОЛЬЗОВАТЕЛЯ
-// =====================================================
-
-function getLastPendingOrder(userId) {
-
-    return db.prepare(`
-        SELECT
-            order_id,
-            user_id,
-            tariff,
-            amount,
-            status
-        FROM payments
-        WHERE user_id = ?
-          AND status = 'pending'
-        ORDER BY created_at DESC
-        LIMIT 1
-    `).get(userId);
-}
-
-
-// =====================================================
-// КЛАВИАТУРЫ
+// KEYBOARD
 // =====================================================
 
 function mainMenu() {
@@ -442,34 +408,29 @@ function mainMenu() {
     };
 }
 
-
 function buyMenu() {
 
     return {
         reply_markup: {
             inline_keyboard: [
-
                 [
                     {
                         text: "50 ₽ — 3 дня",
                         callback_data: "buy_50"
                     }
                 ],
-
                 [
                     {
                         text: "200 ₽ — 1 месяц",
                         callback_data: "buy_200"
                     }
                 ],
-
                 [
                     {
                         text: "600 ₽ — навсегда",
                         callback_data: "buy_600"
                     }
                 ],
-
                 [
                     {
                         text: "⬅️ Назад",
@@ -481,26 +442,21 @@ function buyMenu() {
     };
 }
 
-
-// =====================================================
-// КНОПКИ АДМИНА
-// =====================================================
-
-function adminPaymentKeyboard(orderId) {
+function adminButtons(orderId) {
 
     return {
         reply_markup: {
             inline_keyboard: [
-
                 [
                     {
                         text: "✅ Подтвердить",
-                        callback_data: `admin_confirm_${orderId}`
+                        callback_data:
+                            `admin_confirm_${orderId}`
                     },
-
                     {
                         text: "❌ Отклонить",
-                        callback_data: `admin_reject_${orderId}`
+                        callback_data:
+                            `admin_reject_${orderId}`
                     }
                 ]
             ]
@@ -508,117 +464,159 @@ function adminPaymentKeyboard(orderId) {
     };
 }
 
-
 // =====================================================
 // START
 // =====================================================
 
-bot.onText(/^\/start(?:\s+.*)?$/, (msg) => {
+bot.onText(/^\/start/, async (msg) => {
 
     upsertUser(
         msg.from.id,
         msg.from.username || null
     );
 
-    bot.sendMessage(
+    await bot.sendMessage(
         msg.chat.id,
 
         "👋 Добро пожаловать в J.A.R.V.I.S!\n\n" +
 
         "Это бот для покупки подписки на приложение.\n\n" +
 
-        "Выберите действие в меню ниже.",
+        "Выберите действие:",
 
         mainMenu()
     );
 });
 
-
 // =====================================================
-// /ID
+// ID
 // =====================================================
 
-bot.onText(/^\/id$/, (msg) => {
+bot.onText(/^\/id$/, async (msg) => {
 
-    bot.sendMessage(
+    await bot.sendMessage(
         msg.chat.id,
-        `🆔 Ваш Telegram ID:\n\`${msg.from.id}\``,
+
+        `🆔 Ваш Telegram ID:\n\n` +
+        `\`${msg.from.id}\``,
+
         {
             parse_mode: "Markdown"
         }
     );
 });
 
+// =====================================================
+// PENDING
+// =====================================================
+
+bot.onText(/^\/pending$/, async (msg) => {
+
+    if (!isAdmin(msg.from.id)) {
+        return;
+    }
+
+    const orders = db.prepare(`
+        SELECT *
+        FROM payments
+        WHERE status = 'pending'
+        ORDER BY created_at DESC
+    `).all();
+
+    if (!orders.length) {
+
+        await bot.sendMessage(
+            msg.chat.id,
+            "🕓 Ожидающих заказов нет."
+        );
+
+        return;
+    }
+
+    let text =
+        "🕓 Ожидающие заказы:\n\n";
+
+    for (const order of orders) {
+
+        const tariff =
+            TARIFFS[order.tariff];
+
+        text +=
+            `🧾 ${order.order_id}\n` +
+            `👤 ${order.user_id}\n` +
+            `📦 ${tariff.name}\n` +
+            `💰 ${order.amount} ₽\n\n`;
+    }
+
+    await bot.sendMessage(
+        msg.chat.id,
+        text
+    );
+});
 
 // =====================================================
-// ОСНОВНОЕ МЕНЮ
+// MAIN MESSAGE HANDLER
 // =====================================================
 
 bot.on("message", async (msg) => {
 
-    const text = msg.text;
-
-    if (!text) {
+    if (!msg.text) {
         return;
     }
+
+    const text = msg.text;
 
     upsertUser(
         msg.from.id,
         msg.from.username || null
     );
 
-    // =============================================
-    // ВОЙТИ
-    // =============================================
-
+    // Войти
     if (text === "🔑 Войти") {
 
-        if (isSubActive(msg.from.id)) {
-
-            const row = getUser(msg.from.id);
-
-            const until = new Date(
-                row.sub_until
-            ).toLocaleString("ru-RU");
-
-            await bot.sendMessage(
-                msg.chat.id,
-
-                `✅ Подписка активна до:\n${until}\n\n` +
-
-                `🔑 Ваш ключ доступа:\n` +
-
-                `\`${msg.from.id}\`\n\n` +
-
-                "Скопируйте его и введите в приложении J.A.R.V.I.S.",
-
-                {
-                    parse_mode: "Markdown",
-                    ...mainMenu()
-                }
-            );
-
-        } else {
+        if (!isSubActive(msg.from.id)) {
 
             await bot.sendMessage(
                 msg.chat.id,
 
                 "❌ У вас нет активной подписки.\n\n" +
-
-                "Нажмите «🛒 Купить», чтобы оформить доступ.",
+                "Нажмите «🛒 Купить».",
 
                 mainMenu()
             );
+
+            return;
         }
+
+        const user =
+            getUser(msg.from.id);
+
+        const until =
+            new Date(
+                user.sub_until
+            ).toLocaleString("ru-RU");
+
+        await bot.sendMessage(
+            msg.chat.id,
+
+            `✅ Подписка активна до:\n${until}\n\n` +
+
+            `🔑 Ваш ключ доступа:\n` +
+
+            `\`${msg.from.id}\`\n\n` +
+
+            "Введите этот ключ в приложении J.A.R.V.I.S.",
+
+            {
+                parse_mode: "Markdown",
+                ...mainMenu()
+            }
+        );
 
         return;
     }
 
-
-    // =============================================
-    // КУПИТЬ
-    // =============================================
-
+    // Купить
     if (text === "🛒 Купить") {
 
         await bot.sendMessage(
@@ -630,11 +628,7 @@ bot.on("message", async (msg) => {
         return;
     }
 
-
-    // =============================================
-    // ПОМОЩЬ
-    // =============================================
-
+    // Помощь
     if (text === "ℹ️ Помощь") {
 
         await bot.sendMessage(
@@ -642,72 +636,21 @@ bot.on("message", async (msg) => {
 
             "ℹ️ Помощь\n\n" +
 
-            "🔑 «Войти» — получить ключ при активной подписке.\n\n" +
+            "🔑 Войти — получить ключ.\n\n" +
 
-            "🛒 «Купить» — выбрать тариф.\n\n" +
+            "🛒 Купить — приобрести подписку.\n\n" +
 
-            "💳 После выбора тарифа бот покажет реквизиты.\n\n" +
-
-            "📷 После оплаты отправьте чек через кнопку «Я оплатил».",
+            "📷 После оплаты отправьте чек боту.",
 
             mainMenu()
         );
 
         return;
     }
-
-
-    // =============================================
-    // /pending
-    // =============================================
-
-    if (text === "/pending") {
-
-        if (msg.from.id !== ADMIN_ID) {
-            return;
-        }
-
-        const rows = getPendingOrders();
-
-        if (!rows.length) {
-
-            await bot.sendMessage(
-                ADMIN_ID,
-                "🕓 Ожидающих заказов нет."
-            );
-
-            return;
-        }
-
-        let output =
-            "🕓 Ожидающие заказы:\n\n";
-
-        for (const row of rows) {
-
-            const tariff = TARIFFS[row.tariff];
-
-            output +=
-                `№ \`${row.order_id}\`\n` +
-                `👤 ID: ${row.user_id}\n` +
-                `📦 Тариф: ${tariff.name}\n` +
-                `💰 Сумма: ${row.amount} ₽\n\n`;
-        }
-
-        await bot.sendMessage(
-            ADMIN_ID,
-            output,
-            {
-                parse_mode: "Markdown"
-            }
-        );
-
-        return;
-    }
 });
 
-
 // =====================================================
-// CALLBACK QUERY
+// CALLBACKS
 // =====================================================
 
 bot.on("callback_query", async (query) => {
@@ -722,58 +665,32 @@ bot.on("callback_query", async (query) => {
         const messageId =
             query.message.message_id;
 
-
-        // =============================================
-        // НАЗАД
-        // =============================================
-
+        // Назад
         if (data === "back") {
 
             await bot.answerCallbackQuery(
                 query.id
             );
 
-            await bot.editMessageText(
-                "Выберите действие в меню ниже.",
-
-                {
-                    chat_id: chatId,
-                    message_id: messageId
-                }
-            );
-
             await bot.sendMessage(
                 chatId,
-                "📋 Меню:",
+                "📋 Главное меню:",
                 mainMenu()
             );
 
             return;
         }
 
-
-        // =============================================
-        // ПОКУПКА
-        // =============================================
-
+        // Покупка
         if (data.startsWith("buy_")) {
 
             const tariffKey =
-                data.split("_")[1];
+                data.substring(4);
 
             const tariff =
                 TARIFFS[tariffKey];
 
             if (!tariff) {
-
-                await bot.answerCallbackQuery(
-                    query.id,
-                    {
-                        text: "Ошибка тарифа",
-                        show_alert: true
-                    }
-                );
-
                 return;
             }
 
@@ -788,10 +705,6 @@ bot.on("callback_query", async (query) => {
                     tariffKey
                 );
 
-            const paymentDetails =
-                `💳 Карта: \`${CARD_NUMBER}\`\n` +
-                `👤 ${CARD_HOLDER}`;
-
             await bot.answerCallbackQuery(
                 query.id
             );
@@ -804,17 +717,15 @@ bot.on("callback_query", async (query) => {
 
                 `💰 Сумма: ${tariff.price} ₽\n\n` +
 
-                `━━━━━━━━━━━━━━\n\n` +
-
                 `💳 Реквизиты для оплаты:\n\n` +
 
-                `${paymentDetails}\n\n` +
+                `Карта: \`${CARD_NUMBER}\`\n` +
 
-                `━━━━━━━━━━━━━━\n\n` +
+                `${CARD_HOLDER}\n\n` +
 
-                `⚠️ После перевода обязательно сохраните чек.\n\n` +
+                `⚠️ После перевода сохраните чек.\n\n` +
 
-                `Затем нажмите кнопку «📷 Я оплатил».`,
+                `Затем нажмите «📷 Я оплатил».`,
 
                 {
                     chat_id: chatId,
@@ -824,7 +735,6 @@ bot.on("callback_query", async (query) => {
 
                     reply_markup: {
                         inline_keyboard: [
-
                             [
                                 {
                                     text: "📷 Я оплатил",
@@ -832,14 +742,12 @@ bot.on("callback_query", async (query) => {
                                         `paid_${orderId}`
                                 }
                             ],
-
                             [
                                 {
                                     text: "⬅️ Назад",
                                     callback_data: "back"
                                 }
                             ]
-
                         ]
                     }
                 }
@@ -848,11 +756,7 @@ bot.on("callback_query", async (query) => {
             return;
         }
 
-
-        // =============================================
-        // Я ОПЛАТИЛ
-        // =============================================
-
+        // Я оплатил
         if (data.startsWith("paid_")) {
 
             const orderId =
@@ -879,7 +783,7 @@ bot.on("callback_query", async (query) => {
                 await bot.answerCallbackQuery(
                     query.id,
                     {
-                        text: "Этот заказ принадлежит другому пользователю.",
+                        text: "Это не ваш заказ",
                         show_alert: true
                     }
                 );
@@ -892,7 +796,7 @@ bot.on("callback_query", async (query) => {
                 await bot.answerCallbackQuery(
                     query.id,
                     {
-                        text: "Этот заказ уже обработан.",
+                        text: "Заказ уже обработан",
                         show_alert: true
                     }
                 );
@@ -908,13 +812,11 @@ bot.on("callback_query", async (query) => {
 
                 chatId,
 
-                `📷 Отправьте сюда скриншот или файл чека.\n\n` +
+                `📷 Отправьте чек сюда.\n\n` +
 
                 `🧾 Заказ: \`${orderId}\`\n` +
 
-                `💰 Сумма: ${order.amount} ₽\n\n` +
-
-                `После получения чека администратор проверит оплату.`,
+                `💰 Сумма: ${order.amount} ₽`,
 
                 {
                     parse_mode: "Markdown"
@@ -924,14 +826,13 @@ bot.on("callback_query", async (query) => {
             return;
         }
 
-
-        // =============================================
+        // =================================================
         // ADMIN CONFIRM
-        // =============================================
+        // =================================================
 
         if (data.startsWith("admin_confirm_")) {
 
-            if (query.from.id !== ADMIN_ID) {
+            if (!isAdmin(query.from.id)) {
 
                 await bot.answerCallbackQuery(
                     query.id,
@@ -962,7 +863,6 @@ bot.on("callback_query", async (query) => {
                             "already_processed"
                                 ? "Заказ уже обработан"
                                 : "Ошибка заказа",
-
                         show_alert: true
                     }
                 );
@@ -977,12 +877,7 @@ bot.on("callback_query", async (query) => {
                 }
             );
 
-            const until =
-                result.until.toLocaleString(
-                    "ru-RU"
-                );
-
-            // Меняем кнопки у сообщения админа
+            // Убираем кнопки
             try {
 
                 await bot.editMessageReplyMarkup(
@@ -995,30 +890,14 @@ bot.on("callback_query", async (query) => {
                     }
                 );
 
-            } catch (e) {
-                console.log(
-                    "Не удалось убрать кнопки:",
-                    e.message
+            } catch (error) {}
+
+            const until =
+                result.until.toLocaleString(
+                    "ru-RU"
                 );
-            }
 
-            // Сообщение админу
-            await bot.sendMessage(
-
-                ADMIN_ID,
-
-                `✅ Заказ \`${orderId}\` подтверждён.\n\n` +
-
-                `👤 Пользователь: ${result.userId}\n` +
-
-                `📅 Подписка до: ${until}`,
-
-                {
-                    parse_mode: "Markdown"
-                }
-            );
-
-            // Сообщение пользователю
+            // Пользователь
             await bot.sendMessage(
 
                 result.userId,
@@ -1027,11 +906,9 @@ bot.on("callback_query", async (query) => {
 
                 `📅 Подписка активна до:\n${until}\n\n` +
 
-                `🔑 Ваш ключ доступа:\n` +
+                `🔑 Ваш ключ:\n` +
 
-                `\`${result.userId}\`\n\n` +
-
-                `Скопируйте ключ и введите его в приложении J.A.R.V.I.S.`,
+                `\`${result.userId}\``,
 
                 {
                     parse_mode: "Markdown",
@@ -1039,17 +916,28 @@ bot.on("callback_query", async (query) => {
                 }
             );
 
+            // Всем админам
+            await sendToAdmins(
+
+                `✅ Заказ подтверждён\n\n` +
+
+                `🧾 Заказ: ${orderId}\n` +
+
+                `👤 Пользователь: ${result.userId}\n` +
+
+                `📅 До: ${until}`
+            );
+
             return;
         }
 
-
-        // =============================================
+        // =================================================
         // ADMIN REJECT
-        // =============================================
+        // =================================================
 
         if (data.startsWith("admin_reject_")) {
 
-            if (query.from.id !== ADMIN_ID) {
+            if (!isAdmin(query.from.id)) {
 
                 await bot.answerCallbackQuery(
                     query.id,
@@ -1075,12 +963,7 @@ bot.on("callback_query", async (query) => {
                 await bot.answerCallbackQuery(
                     query.id,
                     {
-                        text:
-                            result.reason ===
-                            "already_processed"
-                                ? "Заказ уже обработан"
-                                : "Заказ не найден",
-
+                        text: "Заказ уже обработан",
                         show_alert: true
                     }
                 );
@@ -1107,29 +990,13 @@ bot.on("callback_query", async (query) => {
                     }
                 );
 
-            } catch (e) {
-                console.log(
-                    "Не удалось убрать кнопки:",
-                    e.message
-                );
-            }
-
-            await bot.sendMessage(
-
-                ADMIN_ID,
-
-                `❌ Заказ \`${orderId}\` отклонён.`,
-
-                {
-                    parse_mode: "Markdown"
-                }
-            );
+            } catch (error) {}
 
             await bot.sendMessage(
 
                 result.userId,
 
-                `❌ Оплата по заказу \`${orderId}\` не подтверждена.\n\n` +
+                `❌ Оплата заказа \`${orderId}\` не подтверждена.\n\n` +
 
                 `Если произошла ошибка, свяжитесь с администратором.`,
 
@@ -1139,13 +1006,20 @@ bot.on("callback_query", async (query) => {
                 }
             );
 
+            await sendToAdmins(
+
+                `❌ Заказ отклонён\n\n` +
+                `🧾 Заказ: ${orderId}\n` +
+                `👤 Пользователь: ${result.userId}`
+            );
+
             return;
         }
 
     } catch (error) {
 
         console.error(
-            "Ошибка callback:",
+            "Callback error:",
             error
         );
 
@@ -1163,9 +1037,8 @@ bot.on("callback_query", async (query) => {
     }
 });
 
-
 // =====================================================
-// ПОЛУЧЕНИЕ ФОТО ЧЕКА
+// PHOTO CHECK
 // =====================================================
 
 bot.on("photo", async (msg) => {
@@ -1173,7 +1046,7 @@ bot.on("photo", async (msg) => {
     try {
 
         const order =
-            getLastPendingOrder(
+            getPendingOrder(
                 msg.from.id
             );
 
@@ -1183,7 +1056,7 @@ bot.on("photo", async (msg) => {
                 msg.chat.id,
 
                 "❌ У вас нет ожидающего заказа.\n\n" +
-                "Сначала выберите тариф через «🛒 Купить»."
+                "Сначала выберите тариф."
             );
 
             return;
@@ -1194,12 +1067,11 @@ bot.on("photo", async (msg) => {
                 ? `@${msg.from.username}`
                 : "нет";
 
-        // Пользователю
         await bot.sendMessage(
 
             msg.chat.id,
 
-            `✅ Чек получен.\n\n` +
+            `✅ Чек получен!\n\n` +
 
             `🧾 Заказ: \`${order.order_id}\`\n\n` +
 
@@ -1210,10 +1082,8 @@ bot.on("photo", async (msg) => {
             }
         );
 
-        // Админу
-        await bot.sendMessage(
-
-            ADMIN_ID,
+        // Отправляем информацию ВСЕМ админам
+        await sendToAdmins(
 
             `💰 НОВЫЙ ПЛАТЁЖ\n\n` +
 
@@ -1232,48 +1102,51 @@ bot.on("photo", async (msg) => {
             }
         );
 
-        // Пересылаем оригинальный чек
-        await bot.forwardMessage(
+        // Отправляем сам чек ВСЕМ админам
+        for (const adminId of ADMIN_IDS) {
 
-            ADMIN_ID,
+            try {
 
-            msg.chat.id,
+                await bot.forwardMessage(
+                    adminId,
+                    msg.chat.id,
+                    msg.message_id
+                );
 
-            msg.message_id
-        );
+                await bot.sendMessage(
 
-        // Кнопки под отдельным сообщением
-        await bot.sendMessage(
+                    adminId,
 
-            ADMIN_ID,
+                    `Что сделать с заказом \`${order.order_id}\`?`,
 
-            `Что сделать с заказом \`${order.order_id}\`?`,
+                    {
+                        parse_mode: "Markdown",
+                        ...adminButtons(
+                            order.order_id
+                        )
+                    }
+                );
 
-            {
-                parse_mode: "Markdown",
-                ...adminPaymentKeyboard(
-                    order.order_id
-                )
+            } catch (error) {
+
+                console.error(
+                    `Ошибка отправки чека админу ${adminId}:`,
+                    error.message
+                );
             }
-        );
+        }
 
     } catch (error) {
 
         console.error(
-            "Ошибка обработки фото:",
+            "Ошибка фото:",
             error
-        );
-
-        await bot.sendMessage(
-            msg.chat.id,
-            "❌ Не удалось обработать чек. Попробуйте ещё раз."
         );
     }
 });
 
-
 // =====================================================
-// ПОЛУЧЕНИЕ ФАЙЛА ЧЕКА
+// DOCUMENT CHECK
 // =====================================================
 
 bot.on("document", async (msg) => {
@@ -1281,7 +1154,7 @@ bot.on("document", async (msg) => {
     try {
 
         const order =
-            getLastPendingOrder(
+            getPendingOrder(
                 msg.from.id
             );
 
@@ -1289,7 +1162,6 @@ bot.on("document", async (msg) => {
 
             await bot.sendMessage(
                 msg.chat.id,
-
                 "❌ У вас нет ожидающего заказа."
             );
 
@@ -1305,7 +1177,7 @@ bot.on("document", async (msg) => {
 
             msg.chat.id,
 
-            `✅ Чек получен.\n\n` +
+            `✅ Чек получен!\n\n` +
 
             `🧾 Заказ: \`${order.order_id}\`\n\n` +
 
@@ -1316,72 +1188,77 @@ bot.on("document", async (msg) => {
             }
         );
 
-        await bot.sendMessage(
+        for (const adminId of ADMIN_IDS) {
 
-            ADMIN_ID,
+            try {
 
-            `💰 НОВЫЙ ПЛАТЁЖ\n\n` +
+                await bot.sendMessage(
 
-            `🧾 Заказ: \`${order.order_id}\`\n` +
+                    adminId,
 
-            `👤 User ID: ${msg.from.id}\n` +
+                    `💰 НОВЫЙ ПЛАТЁЖ\n\n` +
 
-            `👤 Username: ${username}\n` +
+                    `🧾 Заказ: \`${order.order_id}\`\n` +
 
-            `📦 Тариф: ${TARIFFS[order.tariff].name}\n` +
+                    `👤 User ID: ${msg.from.id}\n` +
 
-            `💰 Сумма: ${order.amount} ₽`,
+                    `👤 Username: ${username}\n` +
 
-            {
-                parse_mode: "Markdown"
+                    `📦 Тариф: ${TARIFFS[order.tariff].name}\n` +
+
+                    `💰 Сумма: ${order.amount} ₽`,
+
+                    {
+                        parse_mode: "Markdown"
+                    }
+                );
+
+                await bot.forwardMessage(
+                    adminId,
+                    msg.chat.id,
+                    msg.message_id
+                );
+
+                await bot.sendMessage(
+
+                    adminId,
+
+                    `Что сделать с заказом \`${order.order_id}\`?`,
+
+                    {
+                        parse_mode: "Markdown",
+                        ...adminButtons(
+                            order.order_id
+                        )
+                    }
+                );
+
+            } catch (error) {
+
+                console.error(
+                    `Ошибка админу ${adminId}:`,
+                    error.message
+                );
             }
-        );
-
-        await bot.forwardMessage(
-
-            ADMIN_ID,
-
-            msg.chat.id,
-            msg.message_id
-        );
-
-        await bot.sendMessage(
-
-            ADMIN_ID,
-
-            `Что сделать с заказом \`${order.order_id}\`?`,
-
-            {
-                parse_mode: "Markdown",
-                ...adminPaymentKeyboard(
-                    order.order_id
-                )
-            }
-        );
+        }
 
     } catch (error) {
 
         console.error(
-            "Ошибка обработки документа:",
+            "Ошибка документа:",
             error
-        );
-
-        await bot.sendMessage(
-            msg.chat.id,
-            "❌ Не удалось обработать чек."
         );
     }
 });
 
-
 // =====================================================
-// ЗАПУСК БД
+// START DATABASE
 // =====================================================
 
 initDb();
 
-console.log("=================================");
+console.log("====================================");
 console.log("🤖 J.A.R.V.I.S BOT ЗАПУЩЕН");
-console.log(`👑 ADMIN_ID: ${ADMIN_ID}`);
-console.log(`💾 DATABASE: ${DB_FILE}`);
-console.log("=================================");
+console.log("👑 ADMIN IDS:", ADMIN_IDS.join(", "));
+console.log("💾 DATABASE:", DB_FILE);
+console.log("====================================");
