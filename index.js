@@ -10,7 +10,7 @@ const BOT_TOKEN = process.env.TELEGRAM_TOKEN;
 
 // ДВА АДМИНА ОТДЕЛЬНО
 const ADMIN_ID_1 = 8723208814;
-const ADMIN_ID_2 = 123456789; // <-- сюда ID второго админа
+const ADMIN_ID_2 = 8882462981; // <-- сюда ID второго админа
 
 const ADMIN_IDS = [
     ADMIN_ID_1,
